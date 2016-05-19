@@ -50,12 +50,12 @@ enum
 #define SCAN_INTERVAL                    0x00A0                                         /**< Determines scan interval in units of 0.625 millisecond. */
 #define SCAN_WINDOW                      0x0050                                         /**< Determines scan window in units of 0.625 millisecond. */
 
-#define MIN_CONNECTION_INTERVAL          MSEC_TO_UNITS(10, UNIT_1_25_MS)                /**< Determines maximum connection interval in millisecond. */
-#define MAX_CONNECTION_INTERVAL          MSEC_TO_UNITS(10, UNIT_1_25_MS)                /**< Determines maximum connection interval in millisecond. */
+#define MIN_CONNECTION_INTERVAL          MSEC_TO_UNITS(7.5, UNIT_1_25_MS)                /**< Determines maximum connection interval in millisecond. */
+#define MAX_CONNECTION_INTERVAL          MSEC_TO_UNITS(7.5, UNIT_1_25_MS)                /**< Determines maximum connection interval in millisecond. */
 #define SLAVE_LATENCY                    0                                              /**< Determines slave latency in counts of connection events. */
 #define SUPERVISION_TIMEOUT              MSEC_TO_UNITS(4000, UNIT_10_MS)                /**< Determines supervision time-out in units of 10 millisecond. */
 
-#define TARGET_DEV_NAME                  "Nordic_HRM"                                      /**< Target device name that application is looking for. */
+#define TARGET_DEV_NAME                  "Nordic_HRM1"                                      /**< Target device name that application is looking for. */
 #define MAX_PEER_COUNT                   1                                              /**< Maximum number of peer's application intends to manage. */
 
 #define HRM_SERVICE_UUID                 0x180D
@@ -78,10 +78,11 @@ static uint16_t m_service_end_handle = 0;
 static uint16_t m_hrm_char_handle = 0;
 static uint16_t m_hrm_cccd_handle = 0;
 static bool     m_connection_is_in_progress = false;
-static adapter_t * adapter = NULL;
-static uint32_t hvx_count = 0;
-//static FILETIME hvx_start; 
-static clock_t hvx_start;
+static adapter_t * m_adapter = NULL;
+static uint32_t m_hvx_count = 0;
+static clock_t m_hvx_start;
+static uint32_t m_pkts_lost = 0;
+static uint32_t m_previous_counter = 0;
 
 static const ble_gap_scan_params_t m_scan_param =
 {
@@ -200,7 +201,7 @@ static void on_adv_report(const ble_gap_evt_t * const p_ble_gap_evt)
             return;
         }
 
-        err_code = sd_ble_gap_connect(adapter,
+        err_code = sd_ble_gap_connect(m_adapter,
                                       &(p_ble_gap_evt->params.adv_report.peer_addr),
                                       &m_scan_param,
                                       &m_connection_param);
@@ -353,30 +354,38 @@ static void on_hvx(const ble_gattc_evt_t * const p_ble_gattc_evt)
 {
     clock_t now = clock();
 
-    if (!hvx_start) {
-        hvx_start = now;
+    if (!m_hvx_start) {
+        m_hvx_start = now;
     }
 
-    hvx_count++;
+    m_hvx_count++;
 
-    float seconds = (float)(now - hvx_start) / CLOCKS_PER_SEC;
+    float seconds = (float)(now - m_hvx_start) / CLOCKS_PER_SEC;
 
     int i = 0;
     int length = p_ble_gattc_evt->params.hvx.len;
 
-    float pkt_per_sec = hvx_count / seconds;
+    float pkt_per_sec = m_hvx_count / seconds;
 
-    printf("Received handle value notification, pkt/s: %f, handle: 0x%04X, value: 0x",
-           pkt_per_sec, p_ble_gattc_evt->params.hvx.handle);
-    fflush(stdout);
-
-    for (i = 0; i < length; i++)
-    {
-        printf("%02X", p_ble_gattc_evt->params.hvx.data[i]);
-        fflush(stdout);
+    if (m_hvx_count % 10 == 0) {
+        printf("pkts: %06d, pkts lost: %d, pkt/s: %f\n", m_hvx_count, m_pkts_lost, pkt_per_sec);
     }
 
-    printf("\n"); fflush(stdout);
+    if (length < 4) {
+        return;
+    }
+
+    if ((m_previous_counter + 1) % 256 != p_ble_gattc_evt->params.hvx.data[3]) {
+        m_pkts_lost++;
+    }
+
+    m_previous_counter = p_ble_gattc_evt->params.hvx.data[3];
+
+    //printf("pkts lost: %d, value: %02X%02X\n",
+    //    m_pkts_lost,
+    //    p_ble_gattc_evt->params.hvx.data[2],
+    //    p_ble_gattc_evt->params.hvx.data[3]);
+    fflush(stdout);
 }
 
 static void ble_address_to_string_convert(ble_gap_addr_t address, uint8_t * string_buffer)
@@ -432,7 +441,7 @@ static uint32_t ble_stack_init()
     ble_enable_params.common_enable_params.p_conn_bw_counts = NULL;
     ble_enable_params.common_enable_params.vs_uuid_count = 10;
 
-    err_code = sd_ble_enable(adapter, &ble_enable_params, &app_ram_base);
+    err_code = sd_ble_enable(m_adapter, &ble_enable_params, &app_ram_base);
 
     if (err_code == NRF_SUCCESS)
     {
@@ -451,7 +460,7 @@ static uint32_t ble_stack_init()
 
 static uint32_t scan_start()
 {
-    uint32_t error_code = sd_ble_gap_scan_start(adapter, &m_scan_param);
+    uint32_t error_code = sd_ble_gap_scan_start(m_adapter, &m_scan_param);
 
     if (error_code != NRF_SUCCESS)
     {
@@ -476,7 +485,7 @@ static uint32_t service_discovery_start()
     srvc_uuid.type = BLE_UUID_TYPE_BLE;
     srvc_uuid.uuid = HRM_SERVICE_UUID;
 
-    err_code = sd_ble_gattc_primary_services_discover(adapter,
+    err_code = sd_ble_gattc_primary_services_discover(m_adapter,
                                                       m_connection_handle, start_handle,
                                                       &srvc_uuid);
     if (err_code != NRF_SUCCESS)
@@ -498,7 +507,7 @@ static uint32_t char_discovery_start()
     handle_range.start_handle = m_service_start_handle;
     handle_range.end_handle = m_service_end_handle;
 
-    err_code = sd_ble_gattc_characteristics_discover(adapter, m_connection_handle, &handle_range);
+    err_code = sd_ble_gattc_characteristics_discover(m_adapter, m_connection_handle, &handle_range);
 
     return err_code;
 }
@@ -519,7 +528,7 @@ static uint32_t descr_discovery_start()
     handle_range.start_handle = m_hrm_char_handle;
     handle_range.end_handle = m_service_end_handle;
 
-    err_code = sd_ble_gattc_descriptors_discover(adapter, m_connection_handle, &handle_range);
+    err_code = sd_ble_gattc_descriptors_discover(m_adapter, m_connection_handle, &handle_range);
     return err_code;
 }
 
@@ -542,7 +551,7 @@ static uint32_t hrm_cccd_set(uint8_t value)
     write_params.p_value = cccd_value;
     write_params.write_op = BLE_GATT_OP_WRITE_REQ;
     write_params.offset = 0;
-    err_code = sd_ble_gattc_write(adapter, m_connection_handle, &write_params);
+    err_code = sd_ble_gattc_write(m_adapter, m_connection_handle, &write_params);
 
     return err_code;
 }
@@ -624,17 +633,17 @@ int main(int argc, char *argv[])
 
     printf("Serial port used: %s\n", serial_port); fflush(stdout);
 
-    phy = sd_rpc_physical_layer_create_uart(serial_port, 115200, SD_RPC_FLOW_CONTROL_NONE, SD_RPC_PARITY_NONE);
+    phy = sd_rpc_physical_layer_create_uart(serial_port, 1000000, SD_RPC_FLOW_CONTROL_NONE, SD_RPC_PARITY_NONE);
 
     data_link_layer = sd_rpc_data_link_layer_create_bt_three_wire(phy, 100);
 
     transport_layer = sd_rpc_transport_layer_create(data_link_layer, 100);
 
-    adapter = sd_rpc_adapter_create(transport_layer);
+    m_adapter = sd_rpc_adapter_create(transport_layer);
 
     //sd_rpc_log_handler_severity_filter_set(adapter, SD_RPC_LOG_INFO);
 
-    error_code = sd_rpc_open(adapter, status_handler, ble_evt_dispatch, log_handler);
+    error_code = sd_rpc_open(m_adapter, status_handler, ble_evt_dispatch, log_handler);
 
     if (error_code != NRF_SUCCESS)
     {
@@ -656,12 +665,12 @@ int main(int argc, char *argv[])
     {
         getchar();
         cccd_value ^= CCCD_NOTIFY;
-        hvx_start = 0;
-        hvx_count = 0;
+        m_hvx_start = 0;
+        m_hvx_count = 0;
         hrm_cccd_set(cccd_value);
     }
 
-    error_code = sd_rpc_close(adapter);
+    error_code = sd_rpc_close(m_adapter);
 
     if (error_code != NRF_SUCCESS)
     {

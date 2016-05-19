@@ -359,11 +359,10 @@ uint32_t ble_hrs_heart_rate_measurement_send(ble_hrs_t * p_hrs, uint16_t heart_r
         ble_gatts_hvx_params_t hvx_params;
 
         //len = hrm_encode(p_hrs, heart_rate, encoded_hrm);
-				len = 0;
-			  hvx_len = len;
+        len = 0;
+        hvx_len = len;
 
-			  uint8_t hrm[MAX_HRM_LEN] = {(uint8_t)(cnt >> 24),(uint8_t)(cnt >> 16),(uint8_t)(cnt >> 8), (uint8_t)cnt};
-				
+        uint8_t hrm[MAX_HRM_LEN] = {(uint8_t)(cnt >> 24),(uint8_t)(cnt >> 16),(uint8_t)(cnt >> 8), (uint8_t)cnt};
 
         memset(&hvx_params, 0, sizeof(hvx_params));
 
